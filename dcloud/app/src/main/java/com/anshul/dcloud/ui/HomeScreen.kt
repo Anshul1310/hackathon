@@ -3,6 +3,7 @@ package com.anshul.dcloud.ui
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Environment
 import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteForever
@@ -124,6 +126,182 @@ fun shareFileUrl(context: Context, fileName: String, fileUrl: String?) {
     context.startActivity(shareIntent)
 }
 
+suspend fun downloadFile(
+    context: Context,
+    authToken: String,
+    fileId: String,
+    fileName: String,
+    onProgress: (percentage: Int, statusMessage: String) -> Unit = { _, _ -> }
+) {
+    try {
+        onProgress(0, "Connecting...")
+        val downloadUrl = "${RetrofitClient.BASE_URL}api/files/$fileId/download"
+        val client = okhttp3.OkHttpClient()
+        val request = okhttp3.Request.Builder()
+            .url(downloadUrl)
+            .addHeader("Authorization", authToken)
+            .build()
+
+        val response = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            client.newCall(request).execute()
+        }
+
+        if (!response.isSuccessful) {
+            onProgress(-1, "Server error ${response.code}")
+            return
+        }
+
+        val body = response.body ?: run {
+            onProgress(-1, "Empty response")
+            return
+        }
+
+        val contentLength = body.contentLength()
+        onProgress(0, "Downloading...")
+
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
+                    put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues
+                )
+                if (uri != null) {
+                    context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        body.byteStream().use { inputStream ->
+                            copyWithProgress(inputStream, outputStream, contentLength, onProgress)
+                        }
+                    }
+                    contentValues.clear()
+                    contentValues.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                    context.contentResolver.update(uri, contentValues, null, null)
+                }
+            } else {
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val file = java.io.File(downloadsDir, fileName)
+                file.outputStream().use { outputStream ->
+                    body.byteStream().use { inputStream ->
+                        copyWithProgress(inputStream, outputStream, contentLength, onProgress)
+                    }
+                }
+            }
+        }
+
+        onProgress(100, "Download Complete!")
+    } catch (e: Exception) {
+        onProgress(-1, "Error: ${e.message}")
+    }
+}
+
+suspend fun downloadFolderAsZip(
+    context: Context,
+    authToken: String,
+    folderId: String,
+    folderName: String,
+    onProgress: (percentage: Int, statusMessage: String) -> Unit = { _, _ -> }
+) {
+    val zipFileName = "$folderName.zip"
+    try {
+        onProgress(0, "Connecting...")
+        val downloadUrl = "${RetrofitClient.BASE_URL}api/folders/$folderId/download"
+        val client = okhttp3.OkHttpClient.Builder()
+            .readTimeout(5, java.util.concurrent.TimeUnit.MINUTES)
+            .build()
+        val request = okhttp3.Request.Builder()
+            .url(downloadUrl)
+            .addHeader("Authorization", authToken)
+            .build()
+
+        val response = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            client.newCall(request).execute()
+        }
+
+        if (!response.isSuccessful) {
+            onProgress(-1, "Server error ${response.code}")
+            return
+        }
+
+        val body = response.body ?: run {
+            onProgress(-1, "Empty response")
+            return
+        }
+
+        val contentLength = body.contentLength()
+        onProgress(0, "Downloading ZIP...")
+
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, zipFileName)
+                    put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/zip")
+                    put(android.provider.MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues
+                )
+                if (uri != null) {
+                    context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                        body.byteStream().use { inputStream ->
+                            copyWithProgress(inputStream, outputStream, contentLength, onProgress)
+                        }
+                    }
+                    contentValues.clear()
+                    contentValues.put(android.provider.MediaStore.Downloads.IS_PENDING, 0)
+                    context.contentResolver.update(uri, contentValues, null, null)
+                }
+            } else {
+                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                val file = java.io.File(downloadsDir, zipFileName)
+                file.outputStream().use { outputStream ->
+                    body.byteStream().use { inputStream ->
+                        copyWithProgress(inputStream, outputStream, contentLength, onProgress)
+                    }
+                }
+            }
+        }
+
+        onProgress(100, "Download Complete!")
+    } catch (e: Exception) {
+        onProgress(-1, "Error: ${e.message}")
+    }
+}
+
+private suspend fun copyWithProgress(
+    inputStream: java.io.InputStream,
+    outputStream: java.io.OutputStream,
+    totalBytes: Long,
+    onProgress: (percentage: Int, statusMessage: String) -> Unit
+) {
+    val buffer = ByteArray(8192)
+    var bytesRead: Int
+    var totalRead = 0L
+    var lastReportedPct = -1
+
+    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+        outputStream.write(buffer, 0, bytesRead)
+        totalRead += bytesRead
+        if (totalBytes > 0) {
+            val pct = ((totalRead * 100) / totalBytes).toInt().coerceAtMost(99)
+            if (pct != lastReportedPct) {
+                lastReportedPct = pct
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    onProgress(pct, "Downloading ($pct%)...")
+                }
+            }
+        } else {
+            // Unknown size — report bytes downloaded
+            val readFormatted = formatBytes(totalRead)
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                onProgress(-2, "Downloading... $readFormatted")
+            }
+        }
+    }
+    outputStream.flush()
+}
+
 @Composable
 fun HomeScreen(
     prefManager: SharedPrefManager,
@@ -202,6 +380,11 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
     var renamingFolder by remember { mutableStateOf<FolderDto?>(null) }
     var renamingFile by remember { mutableStateOf<FileDto?>(null) }
     var renameInputName by remember { mutableStateOf("") }
+
+    var isDownloading by remember { mutableStateOf(false) }
+    var downloadingFileName by remember { mutableStateOf("") }
+    var downloadPercentage by remember { mutableIntStateOf(0) }
+    var downloadStatusMessage by remember { mutableStateOf("Preparing download...") }
 
     fun loadContent() {
         coroutineScope.launch {
@@ -588,6 +771,56 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
         )
     }
 
+    if (isDownloading) {
+        AlertDialog(
+            onDismissRequest = {},
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.Download,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(40.dp)
+                )
+            },
+            title = {
+                Text(
+                    text = if (downloadPercentage >= 0) "Downloading ($downloadPercentage%)"
+                           else "Downloading..."
+                )
+            },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = downloadingFileName,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 14.sp
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    if (downloadPercentage >= 0) {
+                        LinearProgressIndicator(
+                            progress = { downloadPercentage / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = downloadStatusMessage,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            },
+            confirmButton = {}
+        )
+    }
+
     if (selectedFileForOptions != null) {
         val targetFile = selectedFileForOptions!!
         ModalBottomSheet(
@@ -680,6 +913,35 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable {
+                            val fileToDownload = targetFile
+                            selectedFileForOptions = null
+                            isDownloading = true
+                            downloadingFileName = fileToDownload.name
+                            downloadPercentage = 0
+                            downloadStatusMessage = "Preparing download..."
+                            coroutineScope.launch {
+                                downloadFile(
+                                    context, authToken, fileToDownload._id, fileToDownload.name
+                                ) { pct, msg ->
+                                    downloadPercentage = pct
+                                    downloadStatusMessage = msg
+                                }
+                                kotlinx.coroutines.delay(800)
+                                isDownloading = false
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Download File", fontSize = 16.sp)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
                             selectedFileForOptions = null
                             coroutineScope.launch {
                                 try {
@@ -754,6 +1016,35 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         text = if (targetFolder.isFavorite) "Remove from Starred" else "Add to Starred",
                         fontSize = 16.sp
                     )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val folderToDownload = targetFolder
+                            selectedFolderForOptions = null
+                            isDownloading = true
+                            downloadingFileName = folderToDownload.name + ".zip"
+                            downloadPercentage = 0
+                            downloadStatusMessage = "Preparing download..."
+                            coroutineScope.launch {
+                                downloadFolderAsZip(
+                                    context, authToken, folderToDownload._id, folderToDownload.name
+                                ) { pct, msg ->
+                                    downloadPercentage = pct
+                                    downloadStatusMessage = msg
+                                }
+                                kotlinx.coroutines.delay(800)
+                                isDownloading = false
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Download as ZIP", fontSize = 16.sp)
                 }
 
                 Row(
@@ -1211,7 +1502,7 @@ fun ProfileTabContent(
                                 ) {}
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Text(
-                                    text = stat.name,
+                                    text =   stat.name,
                                     fontSize = 14.sp,
                                     modifier = Modifier.weight(1f)
                                 )

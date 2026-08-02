@@ -3,7 +3,8 @@ const router = express.Router();
 const Folder = require('../models/Folder');
 const File = require('../models/File');
 const authMiddleware = require('../middleware/auth');
-const { deleteFromS3 } = require('../config/s3');
+const { deleteFromS3, getStreamFromS3 } = require('../config/s3');
+const { ZipArchive } = require('archiver');
 
 router.use(authMiddleware);
 
@@ -152,6 +153,69 @@ router.get('/starred', async (req, res) => {
     res.json({ success: true, folders });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/:id/download', async (req, res) => {
+  try {
+    const folder = await Folder.findOne({ _id: req.params.id, ownerId: req.user.id });
+    if (!folder) {
+      return res.status(404).json({ success: false, message: 'Folder not found' });
+    }
+
+    // Recursively collect all files under this folder
+    async function collectFiles(folderId, pathPrefix) {
+      const results = [];
+      const files = await File.find({ parentFolder: folderId, ownerId: req.user.id, isTrashed: false });
+      for (const file of files) {
+        results.push({ file, archivePath: `${pathPrefix}/${file.name}` });
+      }
+      const subFolders = await Folder.find({ parentFolder: folderId, ownerId: req.user.id, isTrashed: false });
+      for (const sub of subFolders) {
+        const subResults = await collectFiles(sub._id, `${pathPrefix}/${sub.name}`);
+        results.push(...subResults);
+      }
+      return results;
+    }
+
+    const allFiles = await collectFiles(folder._id, folder.name);
+
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(folder.name)}.zip"`);
+    res.setHeader('Content-Type', 'application/zip');
+
+    const archive = new ZipArchive({ zlib: { level: 5 } });
+
+    archive.on('error', (err) => {
+      console.error('[Archive Error]', err);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, message: 'Archive error' });
+      }
+    });
+
+    archive.pipe(res);
+
+    for (const entry of allFiles) {
+      try {
+        const stream = await getStreamFromS3(entry.file.path);
+        if (stream) {
+          archive.append(stream, { name: entry.archivePath });
+        }
+      } catch (e) {
+        console.error(`[Archive Skip] Could not add file ${entry.file.name}:`, e.message);
+      }
+    }
+
+    // If folder is empty, add an empty directory entry so the ZIP isn't empty
+    if (allFiles.length === 0) {
+      archive.append('', { name: `${folder.name}/.keep` });
+    }
+
+    await archive.finalize();
+  } catch (error) {
+    console.error('[Folder Download Error]', error);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: error.message });
+    }
   }
 });
 

@@ -3,7 +3,7 @@ const router = express.Router();
 const multer = require('multer');
 const File = require('../models/File');
 const authMiddleware = require('../middleware/auth');
-const { uploadToS3, deleteFromS3 } = require('../config/s3');
+const { uploadToS3, deleteFromS3, getStreamFromS3 } = require('../config/s3');
 
 const upload = multer({ storage: multer.memoryStorage() });
 const MAX_STORAGE_BYTES = 250 * 1024 * 1024;
@@ -188,6 +188,31 @@ router.get('/starred', async (req, res) => {
     const files = await File.find({ ownerId: req.user.id, isFavorite: true, isTrashed: false }).sort({ name: 1 });
     res.json({ success: true, files });
   } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/:id/download', async (req, res) => {
+  try {
+    const file = await File.findOne({ _id: req.params.id, ownerId: req.user.id });
+    if (!file) {
+      return res.status(404).json({ success: false, message: 'File not found' });
+    }
+
+    const stream = await getStreamFromS3(file.path);
+    if (!stream) {
+      return res.status(404).json({ success: false, message: 'File data not available' });
+    }
+
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.name)}"`);
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    if (file.size) {
+      res.setHeader('Content-Length', file.size);
+    }
+
+    stream.pipe(res);
+  } catch (error) {
+    console.error('[File Download Error]', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });

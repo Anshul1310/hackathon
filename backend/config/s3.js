@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
 
@@ -84,4 +84,41 @@ const deleteFromS3 = async (filePath) => {
   }
 };
 
-module.exports = { uploadToS3, deleteFromS3 };
+const getStreamFromS3 = async (filePath) => {
+  if (!filePath) return null;
+
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const region = process.env.AWS_REGION || 'us-east-1';
+  const bucketName = process.env.AWS_BUCKET_NAME || 'dcloud-storage-bucket';
+
+  if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+    if (!accessKeyId || !secretAccessKey) return null;
+    const fileKey = filePath.split('/').pop();
+    const s3Client = new S3Client({
+      region,
+      credentials: { accessKeyId, secretAccessKey }
+    });
+    const command = new GetObjectCommand({ Bucket: bucketName, Key: fileKey });
+    const response = await s3Client.send(command);
+    return response.Body;
+  } else if (filePath.startsWith('/uploads/')) {
+    const fileName = filePath.replace('/uploads/', '');
+    const localPath = path.join(__dirname, '..', 'uploads', fileName);
+    if (fs.existsSync(localPath)) {
+      return fs.createReadStream(localPath);
+    }
+  }
+  return null;
+};
+
+const getLocalFilePath = (filePath) => {
+  if (!filePath) return null;
+  if (filePath.startsWith('/uploads/')) {
+    const fileName = filePath.replace('/uploads/', '');
+    return path.join(__dirname, '..', 'uploads', fileName);
+  }
+  return null;
+};
+
+module.exports = { uploadToS3, deleteFromS3, getStreamFromS3, getLocalFilePath };
