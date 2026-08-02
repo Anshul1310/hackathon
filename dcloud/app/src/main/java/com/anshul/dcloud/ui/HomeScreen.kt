@@ -1478,7 +1478,7 @@ fun ProfileTabContent(
                                 Text(
                                     text = "${largestCategory.name} consume the largest part of storage (${formatBytes(largestCategory.bytes)} - $percentage%)",
                                     fontSize = 13.sp,
-                                    fontWeight = FontWeight.SemiBold,
+                                     fontWeight = FontWeight.SemiBold,
                                     color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
