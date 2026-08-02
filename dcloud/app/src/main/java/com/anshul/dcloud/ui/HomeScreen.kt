@@ -7,6 +7,7 @@ import android.provider.OpenableColumns
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -39,12 +40,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.anshul.dcloud.fragments.DeletedTabContent
+import com.anshul.dcloud.fragments.StarredTabContent
 import com.anshul.dcloud.network.ProgressRequestBody
 import com.anshul.dcloud.network.RetrofitClient
 import com.anshul.dcloud.network.models.CreateFolderRequest
@@ -238,7 +245,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
 
                     uploadingFileName = fileName
                     uploadingFileSize = formatBytes(fileSize)
-                    uploadStatusMessage = "Uploading to S3 Bucket..."
+                    uploadStatusMessage = "Uploading to server (0%)..."
 
                     val inputStream = context.contentResolver.openInputStream(uri)
                     val bytes = inputStream?.readBytes()
@@ -251,6 +258,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                             contentBytes = bytes,
                             onProgressUpdate = { pct, _, _ ->
                                 uploadPercentage = pct
+                                uploadStatusMessage = "Uploading to server ($pct%)..."
                             }
                         )
 
@@ -265,16 +273,20 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
 
                         if (response.isSuccessful && response.body()?.success == true) {
                             uploadPercentage = 100
-                            uploadStatusMessage = "Upload Complete!"
+                            uploadStatusMessage = "Upload Complete! (100%)"
+                            kotlinx.coroutines.delay(500)
+                            isUploading = false
+                            loadContent()
                         } else {
                             val errorMsg = response.body()?.message ?: "Upload failed"
                             uploadStatusMessage = "Error: $errorMsg"
+                            kotlinx.coroutines.delay(1500)
+                            isUploading = false
                         }
-                        loadContent()
                     }
                 } catch (e: Exception) {
                     uploadStatusMessage = "Upload Error: ${e.localizedMessage}"
-                } finally {
+                    kotlinx.coroutines.delay(1500)
                     isUploading = false
                 }
             }
@@ -948,444 +960,359 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
 }
 
 @Composable
-fun DeletedTabContent(prefManager: SharedPrefManager) {
-    val coroutineScope = rememberCoroutineScope()
-    val token = prefManager.getAuthToken() ?: ""
-    val authToken = if (token.startsWith("Bearer ")) token else "Bearer $token"
+fun StoragePieChart(
+    categoryStats: List<CategoryStat>,
+    totalSizeBytes: Long,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    val strokeWidthPx = with(density) { 32.dp.toPx() }
 
-    var trashedFolders by remember { mutableStateOf<List<FolderDto>>(emptyList()) }
-    var trashedFiles by remember { mutableStateOf<List<FileDto>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(false) }
+    Box(
+        modifier = modifier,
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val chartDiameter = minOf(this.size.width, this.size.height) - strokeWidthPx
+            val topLeftOffset = Offset(
+                (this.size.width - chartDiameter) / 2f,
+                (this.size.height - chartDiameter) / 2f
+            )
 
-    fun loadTrashedContent() {
-        coroutineScope.launch {
-            isLoading = true
-            try {
-                val fRes = RetrofitClient.apiInterface.getTrashedFolders(authToken)
-                if (fRes.isSuccessful && fRes.body() != null) {
-                    trashedFolders = fRes.body()!!.folders
+            if (totalSizeBytes == 0L) {
+                drawArc(
+                    color = Color.LightGray.copy(alpha = 0.3f),
+                    startAngle = 0f,
+                    sweepAngle = 360f,
+                    useCenter = false,
+                    topLeft = topLeftOffset,
+                    size = Size(chartDiameter, chartDiameter),
+                    style = Stroke(width = strokeWidthPx)
+                )
+            } else {
+                var startAngle = -90f
+                categoryStats.forEach { stat ->
+                    val sweepAngle = (stat.bytes.toFloat() / totalSizeBytes.toFloat()) * 360f
+                    if (sweepAngle > 0f) {
+                        drawArc(
+                            color = stat.color,
+                            startAngle = startAngle,
+                            sweepAngle = sweepAngle,
+                            useCenter = false,
+                            topLeft = topLeftOffset,
+                            size = Size(chartDiameter, chartDiameter),
+                            style = Stroke(width = strokeWidthPx)
+                        )
+                        startAngle += sweepAngle
+                    }
                 }
-                val fileRes = RetrofitClient.apiInterface.getTrashedFiles(authToken)
-                if (fileRes.isSuccessful && fileRes.body() != null) {
-                    trashedFiles = fileRes.body()!!.files
-                }
-            } catch (e: Exception) {
-            } finally {
-                isLoading = false
             }
         }
-    }
 
-    LaunchedEffect(Unit) {
-        loadTrashedContent()
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "Trash Bin",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        } else if (trashedFolders.isEmpty() && trashedFiles.isEmpty()) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Delete,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp),
-                    tint = Color.Gray
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "Trash Bin is Empty",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.Gray
-                )
-                Text(
-                    text = "Deleted files will appear here",
-                    fontSize = 14.sp,
-                    color = Color.Gray
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(trashedFolders) { folder ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Folder,
-                                contentDescription = null,
-                                tint = Color.Gray
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = folder.name, fontWeight = FontWeight.Medium)
-                                Text(text = "Trashed Folder", fontSize = 12.sp, color = Color.Gray)
-                            }
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        try {
-                                            RetrofitClient.apiInterface.restoreFolder(authToken, folder._id)
-                                            loadTrashedContent()
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Restore,
-                                    contentDescription = "Restore",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        try {
-                                            RetrofitClient.apiInterface.deleteFolderPermanently(authToken, folder._id)
-                                            loadTrashedContent()
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.DeleteForever,
-                                    contentDescription = "Delete Permanently",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-                    }
-                }
-
-                items(trashedFiles) { file ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.InsertDriveFile,
-                                contentDescription = null,
-                                tint = Color.Gray
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = file.name, fontWeight = FontWeight.Medium)
-                                Text(text = formatBytes(file.size), fontSize = 12.sp, color = Color.Gray)
-                            }
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        try {
-                                            RetrofitClient.apiInterface.restoreFile(authToken, file._id)
-                                            loadTrashedContent()
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Restore,
-                                    contentDescription = "Restore",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        try {
-                                            RetrofitClient.apiInterface.deleteFilePermanently(authToken, file._id)
-                                            loadTrashedContent()
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.DeleteForever,
-                                    contentDescription = "Delete Permanently",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            }
-                        }
-                    }
-                }
-            }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "Used Storage",
+                fontSize = 12.sp,
+                color = Color.Gray
+            )
+            Text(
+                text = formatBytes(totalSizeBytes),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
     }
 }
 
-@Composable
-fun StarredTabContent(prefManager: SharedPrefManager) {
-    val context = LocalContext.current
-    val coroutineScope = rememberCoroutineScope()
-    val token = prefManager.getAuthToken() ?: ""
-    val authToken = if (token.startsWith("Bearer ")) token else "Bearer $token"
-
-    var starredFolders by remember { mutableStateOf<List<FolderDto>>(emptyList()) }
-    var starredFiles by remember { mutableStateOf<List<FileDto>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(false) }
-
-    fun loadStarredContent() {
-        coroutineScope.launch {
-            isLoading = true
-            try {
-                val fRes = RetrofitClient.apiInterface.getStarredFolders(authToken)
-                if (fRes.isSuccessful && fRes.body() != null) {
-                    starredFolders = fRes.body()!!.folders
-                }
-                val fileRes = RetrofitClient.apiInterface.getStarredFiles(authToken)
-                if (fileRes.isSuccessful && fileRes.body() != null) {
-                    starredFiles = fileRes.body()!!.files
-                }
-            } catch (e: Exception) {
-            } finally {
-                isLoading = false
-            }
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        loadStarredContent()
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
-        Text(
-            text = "Starred Items",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Spacer(modifier = Modifier.height(16.dp))
-
-        if (isLoading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        } else if (starredFolders.isEmpty() && starredFiles.isEmpty()) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Star,
-                    contentDescription = null,
-                    modifier = Modifier.size(64.dp),
-                    tint = Color(0xFFFFB300)
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = "No Starred Files",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = Color.Gray
-                )
-                Text(
-                    text = "Star important files or folders for quick access",
-                    fontSize = 14.sp,
-                    color = Color.Gray
-                )
-            }
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(starredFolders) { folder ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Folder,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = folder.name, fontWeight = FontWeight.Medium)
-                                Text(text = "Folder", fontSize = 12.sp, color = Color.Gray)
-                            }
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        try {
-                                            RetrofitClient.apiInterface.toggleStarFolder(authToken, folder._id)
-                                            loadStarredContent()
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Star,
-                                    contentDescription = "Unstar",
-                                    tint = Color(0xFFFFB300)
-                                )
-                            }
-                        }
-                    }
-                }
-
-                items(starredFiles) { file ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                openFileInExternalApp(context, file.path, file.mimeType)
-                            },
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.InsertDriveFile,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.secondary
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(text = file.name, fontWeight = FontWeight.Medium)
-                                Text(text = formatBytes(file.size), fontSize = 12.sp, color = Color.Gray)
-                            }
-                            IconButton(
-                                onClick = {
-                                    shareFileUrl(context, file.name, file.path)
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Share,
-                                    contentDescription = "Share",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    coroutineScope.launch {
-                                        try {
-                                            RetrofitClient.apiInterface.toggleStarFile(authToken, file._id)
-                                            loadStarredContent()
-                                        } catch (e: Exception) {}
-                                    }
-                                }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Star,
-                                    contentDescription = "Unstar",
-                                    tint = Color(0xFFFFB300)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+data class CategoryStat(
+    val name: String,
+    val bytes: Long,
+    val color: Color
+)
 
 @Composable
 fun ProfileTabContent(
     prefManager: SharedPrefManager,
     onSignOut: () -> Unit
 ) {
-    val name = prefManager.getUserName() ?: "User"
-    val email = prefManager.getUserEmail() ?: "Not Available"
-    val jwtToken = prefManager.getAuthToken() ?: "None"
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val token = prefManager.getAuthToken() ?: ""
+    val authToken = if (token.startsWith("Bearer ")) token else "Bearer $token"
 
-    Column(
+    var userName by remember { mutableStateOf(prefManager.getUserName() ?: "User") }
+    var userEmail by remember { mutableStateOf(prefManager.getUserEmail() ?: "Not Available") }
+    var userAvatar by remember { mutableStateOf<String?>(prefManager.getUserAvatar()) }
+
+    var allFiles by remember { mutableStateOf<List<FileDto>>(emptyList()) }
+    var isUploadingAvatar by remember { mutableStateOf(false) }
+
+    fun loadProfileData() {
+        coroutineScope.launch {
+            try {
+                val response = RetrofitClient.apiInterface.getFiles(authToken)
+                if (response.isSuccessful && response.body() != null) {
+                    allFiles = response.body()!!.files
+                }
+            } catch (e: Exception) {}
+        }
+    }
+
+    val avatarPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            coroutineScope.launch {
+                isUploadingAvatar = true
+                try {
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    val bytes = inputStream?.readBytes()
+                    inputStream?.close()
+
+                    if (bytes != null) {
+                        val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+                        val requestFile = bytes.toRequestBody(mimeType.toMediaTypeOrNull())
+                        val body = MultipartBody.Part.createFormData("avatar", "avatar.jpg", requestFile)
+
+                        val response = RetrofitClient.apiInterface.uploadAvatar(authToken, body)
+                        if (response.isSuccessful && response.body()?.success == true) {
+                            val newAvatar = response.body()?.user?.avatar
+                            if (!newAvatar.isNullOrEmpty()) {
+                                userAvatar = newAvatar
+                                prefManager.saveUser(userName, userEmail, newAvatar)
+                                Toast.makeText(context, "Profile picture updated!", Toast.LENGTH_SHORT).show()
+                            }
+                        } else {
+                            Toast.makeText(context, "Failed to upload photo", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                } catch (e: Exception) {
+                    Toast.makeText(context, "Upload error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                } finally {
+                    isUploadingAvatar = false
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        loadProfileData()
+    }
+
+    val totalSizeBytes = allFiles.sumOf { it.size }
+
+    val imagesBytes = allFiles.filter { it.mimeType.startsWith("image/") }.sumOf { it.size }
+    val videosBytes = allFiles.filter { it.mimeType.startsWith("video/") }.sumOf { it.size }
+    val audioBytes = allFiles.filter { it.mimeType.startsWith("audio/") }.sumOf { it.size }
+    val docsBytes = allFiles.filter {
+        it.mimeType.startsWith("application/") || it.mimeType.startsWith("text/") ||
+                it.name.endsWith(".pdf") || it.name.endsWith(".doc") || it.name.endsWith(".docx") || it.name.endsWith(".txt")
+    }.sumOf { it.size }
+    val othersBytes = (totalSizeBytes - (imagesBytes + videosBytes + audioBytes + docsBytes)).coerceAtLeast(0L)
+
+    val categoryStats = listOf(
+        CategoryStat("Images", imagesBytes, Color(0xFF4CAF50)),
+        CategoryStat("Videos", videosBytes, Color(0xFFFF9800)),
+        CategoryStat("Audio", audioBytes, Color(0xFFE91E63)),
+        CategoryStat("Documents", docsBytes, Color(0xFF2196F3)),
+        CategoryStat("Others", othersBytes, Color(0xFF9C27B0))
+    )
+
+    val largestCategory = categoryStats.maxByOrNull { it.bytes }
+
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Spacer(modifier = Modifier.height(24.dp))
-        Surface(
-            modifier = Modifier.size(80.dp).clip(CircleShape),
-            color = MaterialTheme.colorScheme.primary
-        ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    text = name.take(1).uppercase(),
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+        item {
+            Text(
+                text = "Profile & Analytics",
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            )
+
+            Box(
+                modifier = Modifier
+                    .size(110.dp)
+                    .clickable { avatarPickerLauncher.launch("image/*") },
+                contentAlignment = Alignment.Center
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .size(100.dp)
+                        .clip(CircleShape),
+                    color = MaterialTheme.colorScheme.primaryContainer
+                ) {
+                    val avatarUrl = userAvatar
+                    if (!avatarUrl.isNullOrEmpty()) {
+                        coil.compose.AsyncImage(
+                            model = avatarUrl,
+                            contentDescription = "Profile Photo",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                        )
+                    } else {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text(
+                                text = userName.take(1).uppercase(),
+                                fontSize = 36.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                }
+
+                Surface(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .align(Alignment.BottomEnd)
+                        .clip(CircleShape),
+                    color = MaterialTheme.colorScheme.primary,
+                    tonalElevation = 4.dp
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (isUploadingAvatar) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = androidx.compose.material.icons.Icons.Default.Edit,
+                                contentDescription = "Change Photo",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(text = userName, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(text = userEmail, fontSize = 14.sp, color = Color.Gray)
+            Text(
+                text = "Tap photo to change avatar",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+
+            Spacer(modifier = Modifier.height(24.dp))
         }
-        Spacer(modifier = Modifier.height(16.dp))
-        Text(text = name, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        Text(text = email, fontSize = 14.sp, color = Color.Gray)
 
-        Spacer(modifier = Modifier.height(32.dp))
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Storage Breakdown",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(text = "JWT Session Token", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = jwtToken,
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.secondary,
-                    maxLines = 3
-                )
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    StoragePieChart(
+                        categoryStats = categoryStats,
+                        totalSizeBytes = totalSizeBytes,
+                        modifier = Modifier.size(180.dp)
+                    )
+
+                    Spacer(modifier = Modifier.height(20.dp))
+
+                    if (totalSizeBytes > 0L && largestCategory != null && largestCategory.bytes > 0L) {
+                        val percentage = ((largestCategory.bytes.toDouble() / totalSizeBytes.toDouble()) * 100).toInt()
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = largestCategory.color.copy(alpha = 0.15f))
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    modifier = Modifier.size(12.dp).clip(CircleShape),
+                                    color = largestCategory.color
+                                ) {}
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "${largestCategory.name} consume the largest part of storage (${formatBytes(largestCategory.bytes)} - $percentage%)",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        categoryStats.forEach { stat ->
+                            val pct = if (totalSizeBytes > 0L) ((stat.bytes.toDouble() / totalSizeBytes.toDouble()) * 100).toInt() else 0
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    modifier = Modifier.size(12.dp).clip(CircleShape),
+                                    color = stat.color
+                                ) {}
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = stat.name,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = "${formatBytes(stat.bytes)} ($pct%)",
+                                    fontSize = 13.sp,
+                                    color = Color.Gray
+                                )
+                            }
+                        }
+                    }
+                }
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
         }
 
-        Spacer(modifier = Modifier.weight(1f))
-
-        Button(
-            onClick = onSignOut,
-            modifier = Modifier.fillMaxWidth().height(50.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-            shape = RoundedCornerShape(12.dp)
-        ) {
-            Text(text = "Sign Out", color = Color.White, fontSize = 16.sp)
+        item {
+            Button(
+                onClick = onSignOut,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(50.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(text = "Sign Out", color = Color.White, fontSize = 16.sp)
+            }
+            Spacer(modifier = Modifier.height(16.dp))
         }
     }
 }
+
+
+
+

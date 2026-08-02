@@ -2,8 +2,12 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
+const multer = require('multer');
 const User = require('../models/User');
+const authMiddleware = require('../middleware/auth');
+const { uploadToS3 } = require('../config/s3');
 
+const upload = multer({ storage: multer.memoryStorage() });
 const JWT_SECRET = process.env.JWT_SECRET || 'dcloud_secret_jwt_key_2026';
 
 router.post('/github', async (req, res) => {
@@ -78,6 +82,37 @@ router.post('/github', async (req, res) => {
     });
   } catch (error) {
     console.error('[AUTH EXCEPTION]', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/avatar', authMiddleware, upload.single('avatar'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'Avatar image file is required' });
+    }
+
+    const avatarUrl = await uploadToS3(req.file);
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    user.avatar = avatarUrl;
+    await user.save();
+
+    res.json({
+      success: true,
+      avatar: avatarUrl,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        avatar: user.avatar
+      }
+    });
+  } catch (error) {
+    console.error('[AVATAR UPLOAD ERROR]', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });

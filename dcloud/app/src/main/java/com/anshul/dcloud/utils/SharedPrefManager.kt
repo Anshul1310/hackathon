@@ -28,6 +28,8 @@ class SharedPrefManager(context: Context) {
 
     fun getUserEmail(): String? = prefs.getString("user_email", null)
 
+    fun getUserAvatar(): String? = prefs.getString("user_avatar", null).takeIf { !it.isNullOrEmpty() }
+
     fun clear() {
         prefs.edit().clear().apply()
     }

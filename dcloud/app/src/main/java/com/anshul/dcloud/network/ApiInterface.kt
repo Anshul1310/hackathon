@@ -12,6 +12,13 @@ interface ApiInterface {
         @Body request: GitHubAuthRequest
     ): Response<AuthResponse>
 
+    @Multipart
+    @POST("api/auth/avatar")
+    suspend fun uploadAvatar(
+        @Header("Authorization") token: String,
+        @Part avatar: MultipartBody.Part
+    ): Response<AuthResponse>
+
     @POST("api/folders")
     suspend fun createFolder(
         @Header("Authorization") token: String,

@@ -2,11 +2,7 @@ package com.anshul.dcloud.network
 
 import okhttp3.MediaType
 import okhttp3.RequestBody
-import okio.Buffer
 import okio.BufferedSink
-import okio.ForwardingSink
-import okio.Sink
-import okio.buffer
 
 class ProgressRequestBody(
     private val contentType: MediaType?,
@@ -19,21 +15,22 @@ class ProgressRequestBody(
     override fun contentLength(): Long = contentBytes.size.toLong()
 
     override fun writeTo(sink: BufferedSink) {
-        val countingSink = CountingSink(sink)
-        val bufferedSink = countingSink.buffer()
-        bufferedSink.write(contentBytes)
-        bufferedSink.flush()
-    }
+        val total = contentLength()
+        val chunkSize = 16 * 1024
+        var offset = 0
+        var lastPercentage = -1
 
-    private inner class CountingSink(delegate: Sink) : ForwardingSink(delegate) {
-        private var bytesWritten = 0L
+        while (offset < contentBytes.size) {
+            val bytesToWrite = minOf(chunkSize, contentBytes.size - offset)
+            sink.write(contentBytes, offset, bytesToWrite)
+            sink.flush()
+            offset += bytesToWrite
 
-        override fun write(source: Buffer, byteCount: Long) {
-            super.write(source, byteCount)
-            bytesWritten += byteCount
-            val total = contentLength()
-            val percentage = if (total > 0) ((bytesWritten * 100) / total).toInt() else 0
-            onProgressUpdate(percentage, bytesWritten, total)
+            val percentage = if (total > 0) ((offset.toLong() * 100) / total).toInt() else 0
+            if (percentage != lastPercentage) {
+                lastPercentage = percentage
+                onProgressUpdate(percentage, offset.toLong(), total)
+            }
         }
     }
 }
