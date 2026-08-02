@@ -18,6 +18,7 @@ const parseJwtPayload = (token) => {
 
 router.post('/google', async (req, res) => {
   try {
+    console.log('[AUTH] Received Google authentication request:', req.body);
     let { email, name, googleId, avatar, idToken } = req.body;
 
     if (idToken) {
@@ -31,6 +32,7 @@ router.post('/google', async (req, res) => {
     }
 
     if (!email) {
+      console.log('[AUTH ERROR] Missing email in auth request');
       return res.status(400).json({ success: false, message: 'Email is required' });
     }
 
@@ -43,11 +45,13 @@ router.post('/google', async (req, res) => {
         googleId,
         avatar
       });
+      console.log('[AUTH SUCCESS] Created new user in MongoDB:', user);
     } else {
       if (googleId) user.googleId = googleId;
       if (avatar) user.avatar = avatar;
       if (name) user.name = name;
       await user.save();
+      console.log('[AUTH SUCCESS] Updated user profile in MongoDB:', user);
     }
 
     const token = jwt.sign(
@@ -67,6 +71,7 @@ router.post('/google', async (req, res) => {
       }
     });
   } catch (error) {
+    console.error('[AUTH EXCEPTION]', error);
     res.status(500).json({ success: false, message: error.message });
   }
 });

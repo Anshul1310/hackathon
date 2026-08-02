@@ -24,6 +24,12 @@ interface ApiInterface {
         @Query("parentFolder") parentFolder: String? = null
     ): Response<FolderListResponse>
 
+    @PATCH("api/folders/{id}/star")
+    suspend fun toggleStarFolder(
+        @Header("Authorization") token: String,
+        @Path("id") folderId: String
+    ): Response<CreateFolderResponse>
+
     @GET("api/folders/trashed")
     suspend fun getTrashedFolders(
         @Header("Authorization") token: String
@@ -53,6 +59,12 @@ interface ApiInterface {
         @Header("Authorization") token: String,
         @Query("parentFolder") parentFolder: String? = null
     ): Response<FileListResponse>
+
+    @PATCH("api/files/{id}/star")
+    suspend fun toggleStarFile(
+        @Header("Authorization") token: String,
+        @Path("id") fileId: String
+    ): Response<CreateFileResponse>
 
     @GET("api/files/trashed")
     suspend fun getTrashedFiles(

@@ -14,7 +14,7 @@ router.post('/', async (req, res) => {
 
     const folder = await Folder.create({
       name,
-      parentFolder: parentFolder || null,
+      parentFolder: (parentFolder && parentFolder !== 'null' && parentFolder !== 'root') ? parentFolder : null,
       ownerId: req.user.id
     });
 
@@ -35,6 +35,22 @@ router.get('/', async (req, res) => {
 
     const folders = await Folder.find(query).sort({ name: 1 });
     res.json({ success: true, folders });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.patch('/:id/star', async (req, res) => {
+  try {
+    const folder = await Folder.findOne({ _id: req.params.id, ownerId: req.user.id });
+    if (!folder) {
+      return res.status(404).json({ success: false, message: 'Folder not found' });
+    }
+
+    folder.isFavorite = !folder.isFavorite;
+    await folder.save();
+
+    res.json({ success: true, folder });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }

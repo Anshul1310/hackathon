@@ -1,5 +1,11 @@
 package com.anshul.dcloud.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -9,13 +15,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -23,22 +33,72 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anshul.dcloud.network.RetrofitClient
-import com.anshul.dcloud.network.models.CreateFileRequest
 import com.anshul.dcloud.network.models.CreateFolderRequest
 import com.anshul.dcloud.network.models.FileDto
 import com.anshul.dcloud.network.models.FolderDto
 import com.anshul.dcloud.utils.SharedPrefManager
 import kotlinx.coroutines.launch
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 
 sealed class BottomNavItem(val route: String, val title: String, val icon: ImageVector) {
     object Home : BottomNavItem("home_tab", "Home", Icons.Default.Home)
     object Deleted : BottomNavItem("deleted_tab", "Deleted", Icons.Default.Delete)
     object Starred : BottomNavItem("starred_tab", "Starred", Icons.Default.Star)
     object Profile : BottomNavItem("profile_tab", "Profile", Icons.Default.Person)
+}
+
+fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return "0 B"
+    val kb = bytes / 1024.0
+    val mb = kb / 1024.0
+    val gb = mb / 1024.0
+    return when {
+        gb >= 1.0 -> String.format("%.2f GB", gb)
+        mb >= 1.0 -> String.format("%.2f MB", mb)
+        kb >= 1.0 -> String.format("%.2f KB", kb)
+        else -> "$bytes B"
+    }
+}
+
+fun openFileInExternalApp(context: Context, fileUrl: String?, mimeType: String?) {
+    if (fileUrl.isNullOrEmpty()) return
+    val fullUrl = if (fileUrl.startsWith("/")) "http://127.0.0.1:5000$fileUrl" else fileUrl
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(Uri.parse(fullUrl), mimeType ?: "*/*")
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(fullUrl)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        try {
+            context.startActivity(browserIntent)
+        } catch (ex: Exception) {
+        }
+    }
+}
+
+fun shareFileUrl(context: Context, fileName: String, fileUrl: String?) {
+    if (fileUrl.isNullOrEmpty()) return
+    val fullUrl = if (fileUrl.startsWith("/")) "http://127.0.0.1:5000$fileUrl" else fileUrl
+    val sendIntent = Intent().apply {
+        action = Intent.ACTION_SEND
+        putExtra(Intent.EXTRA_TEXT, "Check out $fileName on DCloud: $fullUrl")
+        type = "text/plain"
+    }
+    val shareIntent = Intent.createChooser(sendIntent, "Share file link via")
+    shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    context.startActivity(shareIntent)
 }
 
 @Composable
@@ -88,6 +148,7 @@ fun HomeScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeTabContent(prefManager: SharedPrefManager) {
+    val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val token = prefManager.getAuthToken() ?: ""
     val authToken = if (token.startsWith("Bearer ")) token else "Bearer $token"
@@ -99,12 +160,14 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
     var files by remember { mutableStateOf<List<FileDto>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
 
+    var isUploading by remember { mutableStateOf(false) }
+    var uploadingFileName by remember { mutableStateOf("") }
+    var uploadingFileSize by remember { mutableStateOf("") }
+    var uploadStatusMessage by remember { mutableStateOf("Preparing upload...") }
+
     var showCreateOptionsModal by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var showCreateFileDialog by remember { mutableStateOf(false) }
-
     var newFolderName by remember { mutableStateOf("") }
-    var newFileName by remember { mutableStateOf("") }
 
     fun loadContent() {
         coroutineScope.launch {
@@ -121,6 +184,63 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
             } catch (e: Exception) {
             } finally {
                 isLoading = false
+            }
+        }
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            coroutineScope.launch {
+                isUploading = true
+                uploadStatusMessage = "Reading file details..."
+                try {
+                    var fileName = "file"
+                    var fileSize: Long = 0
+
+                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (cursor.moveToFirst()) {
+                            if (nameIndex != -1) fileName = cursor.getString(nameIndex)
+                            if (sizeIndex != -1) fileSize = cursor.getLong(sizeIndex)
+                        }
+                    }
+
+                    uploadingFileName = fileName
+                    uploadingFileSize = formatBytes(fileSize)
+                    uploadStatusMessage = "Uploading to S3 Bucket..."
+
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    val bytes = inputStream?.readBytes()
+                    inputStream?.close()
+
+                    if (bytes != null) {
+                        val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                        val requestFile = bytes.toRequestBody(mimeType.toMediaTypeOrNull())
+                        val body = MultipartBody.Part.createFormData("file", fileName, requestFile)
+                        val parentBody = currentParentId?.toRequestBody("text/plain".toMediaTypeOrNull())
+
+                        val response = RetrofitClient.apiInterface.uploadFile(
+                            token = authToken,
+                            file = body,
+                            parentFolder = parentBody
+                        )
+
+                        if (response.isSuccessful && response.body()?.success == true) {
+                            uploadStatusMessage = "Upload Complete!"
+                        } else {
+                            val errorMsg = response.body()?.message ?: "Quota or server error"
+                            uploadStatusMessage = "Upload Failed: $errorMsg"
+                        }
+                        loadContent()
+                    }
+                } catch (e: Exception) {
+                    uploadStatusMessage = "Upload Error: ${e.localizedMessage}"
+                } finally {
+                    isUploading = false
+                }
             }
         }
     }
@@ -156,18 +276,30 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 }
-                Text(
-                    text = if (folderStack.isEmpty()) "My Storage" else folderStack.last().name,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold
-                )
+                Column {
+                    Text(
+                        text = if (folderStack.isEmpty()) "My Storage" else folderStack.last().name,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (folderStack.isNotEmpty()) {
+                        val pathString = "Root / " + folderStack.joinToString(" / ") { it.name }
+                        Text(
+                            text = pathString,
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(12.dp))
 
             if (folderStack.isEmpty()) {
                 val totalSizeBytes = files.sumOf { it.size }
-                val usedMb = String.format("%.2f", totalSizeBytes / (1024.0 * 1024.0))
+                val maxQuotaBytes = 250 * 1024 * 1024L
+                val progressFraction = (totalSizeBytes.toDouble() / maxQuotaBytes.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                val usedString = formatBytes(totalSizeBytes)
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -176,18 +308,18 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                 ) {
                     Column(modifier = Modifier.padding(20.dp)) {
                         Text(
-                            text = "Storage Usage",
+                            text = "Storage Usage (250 MB Quota)",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         LinearProgressIndicator(
-                            progress = { 0.1f },
+                            progress = { progressFraction },
                             modifier = Modifier.fillMaxWidth().height(8.dp),
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
-                            text = "$usedMb MB of 10 GB used",
+                            text = "$usedString of 250 MB used (${(progressFraction * 100).toInt()}%)",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onPrimaryContainer
                         )
@@ -197,7 +329,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
             }
 
             Text(
-                text = "Contents",
+                text = if (folderStack.isEmpty()) "Root Contents" else "Folder Contents",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -209,7 +341,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                 }
             } else if (folders.isEmpty() && files.isEmpty()) {
                 Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                    Text(text = "Folder is empty. Click + to add.", color = Color.Gray)
+                    Text(text = "This directory is empty. Tap + to add items.", color = Color.Gray)
                 }
             } else {
                 LazyColumn(
@@ -226,7 +358,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(16.dp),
+                                    .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -234,10 +366,26 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.primary
                                 )
-                                Spacer(modifier = Modifier.width(16.dp))
-                                Column {
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(text = folder.name, fontWeight = FontWeight.Medium)
                                     Text(text = "Folder", fontSize = 12.sp, color = Color.Gray)
+                                }
+                                IconButton(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            try {
+                                                RetrofitClient.apiInterface.toggleStarFolder(authToken, folder._id)
+                                                loadContent()
+                                            } catch (e: Exception) {}
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = if (folder.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                                        contentDescription = "Star",
+                                        tint = if (folder.isFavorite) Color(0xFFFFB300) else Color.Gray
+                                    )
                                 }
                             }
                         }
@@ -245,13 +393,17 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
 
                     items(files) { file ->
                         Card(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    openFileInExternalApp(context, file.path, file.mimeType)
+                                },
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(16.dp),
+                                    .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -259,10 +411,37 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.secondary
                                 )
-                                Spacer(modifier = Modifier.width(16.dp))
-                                Column {
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text(text = file.name, fontWeight = FontWeight.Medium)
-                                    Text(text = "${file.size} bytes", fontSize = 12.sp, color = Color.Gray)
+                                    Text(text = formatBytes(file.size), fontSize = 12.sp, color = Color.Gray)
+                                }
+                                IconButton(
+                                    onClick = {
+                                        shareFileUrl(context, file.name, file.path)
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Share",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                IconButton(
+                                    onClick = {
+                                        coroutineScope.launch {
+                                            try {
+                                                RetrofitClient.apiInterface.toggleStarFile(authToken, file._id)
+                                                loadContent()
+                                            } catch (e: Exception) {}
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = if (file.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                                        contentDescription = "Star",
+                                        tint = if (file.isFavorite) Color(0xFFFFB300) else Color.Gray
+                                    )
                                 }
                             }
                         }
@@ -270,6 +449,49 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                 }
             }
         }
+    }
+
+    if (isUploading) {
+        AlertDialog(
+            onDismissRequest = {},
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.CloudUpload,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(40.dp)
+                )
+            },
+            title = { Text(text = "Uploading File") },
+            text = {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = uploadingFileName,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 14.sp
+                    )
+                    if (uploadingFileSize.isNotEmpty()) {
+                        Text(
+                            text = uploadingFileSize,
+                            fontSize = 12.sp,
+                            color = Color.Gray
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = uploadStatusMessage,
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+            },
+            confirmButton = {}
+        )
     }
 
     if (showCreateOptionsModal) {
@@ -304,14 +526,14 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         .fillMaxWidth()
                         .clickable {
                             showCreateOptionsModal = false
-                            showCreateFileDialog = true
+                            filePickerLauncher.launch("*/*")
                         }
                         .padding(vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.InsertDriveFile, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                    Icon(Icons.Default.UploadFile, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
                     Spacer(modifier = Modifier.width(16.dp))
-                    Text(text = "Create File", fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(text = "Upload File", fontSize = 16.sp, fontWeight = FontWeight.Medium)
                 }
             }
         }
@@ -364,56 +586,6 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
             }
         )
     }
-
-    if (showCreateFileDialog) {
-        AlertDialog(
-            onDismissRequest = { showCreateFileDialog = false },
-            title = { Text(text = "New File") },
-            text = {
-                OutlinedTextField(
-                    value = newFileName,
-                    onValueChange = { newFileName = it },
-                    label = { Text("File Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        if (newFileName.isNotBlank()) {
-                            coroutineScope.launch {
-                                try {
-                                    val res = RetrofitClient.apiInterface.createFile(
-                                        token = authToken,
-                                        request = CreateFileRequest(
-                                            name = newFileName,
-                                            size = 2048,
-                                            mimeType = "text/plain",
-                                            parentFolder = currentParentId
-                                        )
-                                    )
-                                    if (res.isSuccessful && res.body()?.success == true) {
-                                        newFileName = ""
-                                        showCreateFileDialog = false
-                                        loadContent()
-                                    }
-                                } catch (e: Exception) {
-                                }
-                            }
-                        }
-                    }
-                ) {
-                    Text("Create")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showCreateFileDialog = false }) {
-                    Text("Cancel")
-                }
-            }
-        )
-    }
 }
 
 @Composable
@@ -448,31 +620,182 @@ fun DeletedTabContent(prefManager: SharedPrefManager) {
 
 @Composable
 fun StarredTabContent(prefManager: SharedPrefManager) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val token = prefManager.getAuthToken() ?: ""
+    val authToken = if (token.startsWith("Bearer ")) token else "Bearer $token"
+
+    var starredFolders by remember { mutableStateOf<List<FolderDto>>(emptyList()) }
+    var starredFiles by remember { mutableStateOf<List<FileDto>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+
+    fun loadStarredContent() {
+        coroutineScope.launch {
+            isLoading = true
+            try {
+                val fRes = RetrofitClient.apiInterface.getStarredFolders(authToken)
+                if (fRes.isSuccessful && fRes.body() != null) {
+                    starredFolders = fRes.body()!!.folders
+                }
+                val fileRes = RetrofitClient.apiInterface.getStarredFiles(authToken)
+                if (fileRes.isSuccessful && fileRes.body() != null) {
+                    starredFiles = fileRes.body()!!.files
+                }
+            } catch (e: Exception) {
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        loadStarredContent()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+            .padding(16.dp)
     ) {
-        Icon(
-            imageVector = Icons.Default.Star,
-            contentDescription = null,
-            modifier = Modifier.size(64.dp),
-            tint = Color(0xFFFFB300)
+        Text(
+            text = "Starred Items",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "No Starred Files",
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.Gray
-        )
-        Text(
-            text = "Star important files for quick access",
-            fontSize = 14.sp,
-            color = Color.Gray
-        )
+
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (starredFolders.isEmpty() && starredFiles.isEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Star,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = Color(0xFFFFB300)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "No Starred Files",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.Gray
+                )
+                Text(
+                    text = "Star important files or folders for quick access",
+                    fontSize = 14.sp,
+                    color = Color.Gray
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(starredFolders) { folder ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Folder,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = folder.name, fontWeight = FontWeight.Medium)
+                                Text(text = "Folder", fontSize = 12.sp, color = Color.Gray)
+                            }
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        try {
+                                            RetrofitClient.apiInterface.toggleStarFolder(authToken, folder._id)
+                                            loadStarredContent()
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Star,
+                                    contentDescription = "Unstar",
+                                    tint = Color(0xFFFFB300)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                items(starredFiles) { file ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                openFileInExternalApp(context, file.path, file.mimeType)
+                            },
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.InsertDriveFile,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.secondary
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = file.name, fontWeight = FontWeight.Medium)
+                                Text(text = formatBytes(file.size), fontSize = 12.sp, color = Color.Gray)
+                            }
+                            IconButton(
+                                onClick = {
+                                    shareFileUrl(context, file.name, file.path)
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Share,
+                                    contentDescription = "Share",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        try {
+                                            RetrofitClient.apiInterface.toggleStarFile(authToken, file._id)
+                                            loadStarredContent()
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Star,
+                                    contentDescription = "Unstar",
+                                    tint = Color(0xFFFFB300)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

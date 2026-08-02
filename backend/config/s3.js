@@ -10,7 +10,10 @@ const uploadToS3 = async (file) => {
 
   const fileKey = `${Date.now()}_${file.originalname}`;
 
+  console.log(`[S3 Upload Attempt] File: ${file.originalname}, Size: ${file.size} bytes, Mime: ${file.mimetype}`);
+
   if (accessKeyId && secretAccessKey) {
+    console.log(`[S3 Target] Uploading to AWS S3 bucket "${bucketName}" in region "${region}"...`);
     const s3Client = new S3Client({
       region,
       credentials: {
@@ -27,15 +30,20 @@ const uploadToS3 = async (file) => {
     });
 
     await s3Client.send(command);
-    return `https://${bucketName}.s3.${region}.amazonaws.com/${fileKey}`;
+    const s3Url = `https://${bucketName}.s3.${region}.amazonaws.com/${fileKey}`;
+    console.log(`[S3 Success] File uploaded to S3: ${s3Url}`);
+    return s3Url;
   } else {
+    console.log(`[Local Fallback] AWS credentials missing. Saving file to local uploads directory...`);
     const uploadsDir = path.join(__dirname, '..', 'uploads');
     if (!fs.existsSync(uploadsDir)) {
       fs.mkdirSync(uploadsDir, { recursive: true });
     }
     const localPath = path.join(uploadsDir, fileKey);
     fs.writeFileSync(localPath, file.buffer);
-    return `/uploads/${fileKey}`;
+    const localUrl = `/uploads/${fileKey}`;
+    console.log(`[Local Success] File saved locally at: ${localUrl}`);
+    return localUrl;
   }
 };
 
