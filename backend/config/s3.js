@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const fs = require('fs');
 const path = require('path');
 
@@ -21,6 +21,7 @@ const uploadToS3 = async (file) => {
         secretAccessKey
       }
     });
+
 
     const command = new PutObjectCommand({
       Bucket: bucketName,
@@ -47,4 +48,40 @@ const uploadToS3 = async (file) => {
   }
 };
 
-module.exports = { uploadToS3 };
+const deleteFromS3 = async (filePath) => {
+  if (!filePath) return;
+
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY;
+  const region = process.env.AWS_REGION || 'us-east-1';
+  const bucketName = process.env.AWS_BUCKET_NAME || 'dcloud-storage-bucket';
+
+  if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+    if (accessKeyId && secretAccessKey) {
+      try {
+        const fileKey = filePath.split('/').pop();
+        const s3Client = new S3Client({
+          region,
+          credentials: { accessKeyId, secretAccessKey }
+        });
+        await s3Client.send(new DeleteObjectCommand({ Bucket: bucketName, Key: fileKey }));
+        console.log(`[S3 Delete Success] Key: ${fileKey}`);
+      } catch (e) {
+        console.error('[S3 Delete Error]', e);
+      }
+    }
+  } else if (filePath.startsWith('/uploads/')) {
+    try {
+      const fileName = filePath.replace('/uploads/', '');
+      const localPath = path.join(__dirname, '..', 'uploads', fileName);
+      if (fs.existsSync(localPath)) {
+        fs.unlinkSync(localPath);
+        console.log(`[Local Delete Success] File: ${localPath}`);
+      }
+    } catch (e) {
+      console.error('[Local Delete Error]', e);
+    }
+  }
+};
+
+module.exports = { uploadToS3, deleteFromS3 };

@@ -1,31 +1,32 @@
 package com.anshul.dcloud
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.*
-import androidx.credentials.CredentialManager
-import androidx.credentials.CustomCredential
-import androidx.credentials.GetCredentialRequest
 import androidx.lifecycle.lifecycleScope
+import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.anshul.dcloud.network.RetrofitClient
-import com.anshul.dcloud.network.models.GoogleAuthRequest
+import com.anshul.dcloud.network.models.GitHubAuthRequest
 import com.anshul.dcloud.ui.AuthScreen
 import com.anshul.dcloud.ui.HomeScreen
 import com.anshul.dcloud.ui.SplashScreen
 import com.anshul.dcloud.ui.theme.DcloudTheme
 import com.anshul.dcloud.utils.SharedPrefManager
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
-import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var prefManager: SharedPrefManager
+    private var navControllerRef: NavController? = null
+    private var isAuthProcessingState = mutableStateOf(false)
+    private var authErrorMessageState = mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -36,6 +37,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             DcloudTheme {
                 val navController = rememberNavController()
+                navControllerRef = navController
 
                 NavHost(
                     navController = navController,
@@ -54,50 +56,36 @@ class MainActivity : ComponentActivity() {
                     }
 
                     composable("login") {
-                        var isLoading by remember { mutableStateOf(false) }
-                        var errorMessage by remember { mutableStateOf<String?>(null) }
+                        val isLoading by isAuthProcessingState
+                        val errorMessage by authErrorMessageState
 
                         AuthScreen(
-                            isAuthenticated = false,
-                            userName = null,
-                            userEmail = null,
-                            jwtToken = null,
                             isLoading = isLoading,
                             errorMessage = errorMessage,
-                            onGoogleSignInClick = {
-                                triggerGoogleSignIn(
-                                    onStart = {
-                                        isLoading = true
-                                        errorMessage = null
-                                    },
-                                    onSuccess = { email, name, googleId, avatar, idToken ->
-                                        authenticateWithBackend(
-                                            email = email,
-                                            name = name,
-                                            googleId = googleId,
-                                            avatar = avatar,
-                                            idToken = idToken,
-                                            onComplete = { success, token, user, msg ->
-                                                isLoading = false
-                                                if (success && token != null && user != null) {
-                                                    prefManager.saveAuthToken(token)
-                                                    prefManager.saveUser(user.name, user.email, user.avatar)
-                                                    navController.navigate("home") {
-                                                        popUpTo("login") { inclusive = true }
-                                                    }
-                                                } else {
-                                                    errorMessage = msg ?: "Authentication failed"
-                                                }
+                            onGitHubOAuthClick = {
+                                isAuthProcessingState.value = true
+                                authErrorMessageState.value = null
+                                openGitHubOAuthBrowser()
+                            },
+                            onDirectGitHubSignIn = { username ->
+                                isAuthProcessingState.value = true
+                                authErrorMessageState.value = null
+                                authenticateWithGitHubRequest(
+                                    request = GitHubAuthRequest(username = username),
+                                    onComplete = { success, token, user, msg ->
+                                        isAuthProcessingState.value = false
+                                        if (success && token != null && user != null) {
+                                            prefManager.saveAuthToken(token)
+                                            prefManager.saveUser(user.name, user.email, user.avatar)
+                                            navController.navigate("home") {
+                                                popUpTo("login") { inclusive = true }
                                             }
-                                        )
-                                    },
-                                    onError = { err ->
-                                        isLoading = false
-                                        errorMessage = err
+                                        } else {
+                                            authErrorMessageState.value = msg ?: "Authentication failed"
+                                        }
                                     }
                                 )
-                            },
-                            onSignOutClick = {}
+                            }
                         )
                     }
 
@@ -115,74 +103,62 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+
+        handleOAuthDeepLink(intent)
     }
 
-    private fun triggerGoogleSignIn(
-        onStart: () -> Unit,
-        onSuccess: (email: String, name: String?, googleId: String?, avatar: String?, idToken: String?) -> Unit,
-        onError: (String) -> Unit
-    ) {
-        onStart()
-        val credentialManager = CredentialManager.create(this)
-        val googleIdOption = GetGoogleIdOption.Builder()
-            .setFilterByAuthorizedAccounts(false)
-            .setServerClientId("1007180393677-59fk15p1m5tjsb01dug1iaof2q9vocfd.apps.googleusercontent.com")
-            .setAutoSelectEnabled(false)
-            .build()
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleOAuthDeepLink(intent)
+    }
 
-        val request = GetCredentialRequest.Builder()
-            .addCredentialOption(googleIdOption)
-            .build()
+    private fun openGitHubOAuthBrowser() {
+        val clientId = "Ov23liTcXt2TBlgDWYQg"
+        val redirectUri = "dcloud://oauth"
+        val oauthUrl = "https://github.com/login/oauth/authorize?client_id=$clientId&redirect_uri=$redirectUri&scope=user:email"
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(oauthUrl))
+        startActivity(intent)
+    }
 
-        lifecycleScope.launch {
-            try {
-                val result = credentialManager.getCredential(
-                    request = request,
-                    context = this@MainActivity
+    private fun handleOAuthDeepLink(intent: Intent?) {
+        val uri = intent?.data
+        if (uri != null && uri.scheme == "dcloud" && uri.host == "oauth") {
+            val code = uri.getQueryParameter("code")
+            if (!code.isNullOrEmpty()) {
+                isAuthProcessingState.value = true
+                authErrorMessageState.value = null
+                authenticateWithGitHubRequest(
+                    request = GitHubAuthRequest(code = code),
+                    onComplete = { success, token, user, msg ->
+                        isAuthProcessingState.value = false
+                        if (success && token != null && user != null) {
+                            prefManager.saveAuthToken(token)
+                            prefManager.saveUser(user.name, user.email, user.avatar)
+                            navControllerRef?.navigate("home") {
+                                popUpTo("login") { inclusive = true }
+                            }
+                        } else {
+                            authErrorMessageState.value = msg ?: "GitHub OAuth failed"
+                        }
+                    }
                 )
-                val credential = result.credential
-                if (credential is CustomCredential && credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
-                    val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                    onSuccess(
-                        googleIdTokenCredential.id,
-                        googleIdTokenCredential.displayName,
-                        googleIdTokenCredential.id,
-                        googleIdTokenCredential.profilePictureUri?.toString(),
-                        googleIdTokenCredential.idToken
-                    )
-                } else {
-                    onSuccess("user@gmail.com", "Google User", "google_123456", null, null)
-                }
-            } catch (e: Exception) {
-                onSuccess("user@gmail.com", "Google User", "google_123456", null, null)
             }
         }
     }
 
-    private fun authenticateWithBackend(
-        email: String,
-        name: String?,
-        googleId: String?,
-        avatar: String?,
-        idToken: String?,
+    private fun authenticateWithGitHubRequest(
+        request: GitHubAuthRequest,
         onComplete: (Boolean, String?, com.anshul.dcloud.network.models.UserDto?, String?) -> Unit
     ) {
         lifecycleScope.launch {
             try {
-                val response = RetrofitClient.apiInterface.googleAuth(
-                    GoogleAuthRequest(
-                        email = email,
-                        name = name,
-                        googleId = googleId,
-                        avatar = avatar,
-                        idToken = idToken
-                    )
-                )
+                val response = RetrofitClient.apiInterface.githubAuth(request)
                 if (response.isSuccessful && response.body() != null) {
                     val body = response.body()!!
                     onComplete(body.success, body.token, body.user, body.message)
                 } else {
-                    onComplete(false, null, null, "Server response error: ${response.code()}")
+                    onComplete(false, null, null, "Server error: ${response.code()}")
                 }
             } catch (e: Exception) {
                 onComplete(false, null, null, "Network error: ${e.localizedMessage}")

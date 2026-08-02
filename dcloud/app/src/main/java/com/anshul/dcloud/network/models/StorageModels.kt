@@ -12,6 +12,10 @@ data class CreateFileRequest(
     val parentFolder: String? = null
 )
 
+data class RenameRequest(
+    val name: String
+)
+
 data class FolderDto(
     val _id: String,
     val name: String,

@@ -1,11 +1,11 @@
 package com.anshul.dcloud.network.models
 
-data class GoogleAuthRequest(
-    val email: String,
-    val name: String? = null,
-    val googleId: String? = null,
-    val avatar: String? = null,
-    val idToken: String? = null
+data class GitHubAuthRequest(
+    val code: String? = null,
+    val username: String? = null,
+    val email: String? = null,
+    val githubId: String? = null,
+    val avatar: String? = null
 )
 
 data class UserDto(

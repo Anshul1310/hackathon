@@ -4,9 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,11 +21,16 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.UploadFile
@@ -37,15 +45,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.anshul.dcloud.network.ProgressRequestBody
 import com.anshul.dcloud.network.RetrofitClient
 import com.anshul.dcloud.network.models.CreateFolderRequest
 import com.anshul.dcloud.network.models.FileDto
 import com.anshul.dcloud.network.models.FolderDto
+import com.anshul.dcloud.network.models.RenameRequest
 import com.anshul.dcloud.utils.SharedPrefManager
 import kotlinx.coroutines.launch
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
-import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 
 sealed class BottomNavItem(val route: String, val title: String, val icon: ImageVector) {
@@ -69,7 +78,10 @@ fun formatBytes(bytes: Long): String {
 }
 
 fun openFileInExternalApp(context: Context, fileUrl: String?, mimeType: String?) {
-    if (fileUrl.isNullOrEmpty()) return
+    if (fileUrl.isNullOrEmpty()) {
+        Toast.makeText(context, "Cannot open file: file does not exist", Toast.LENGTH_SHORT).show()
+        return
+    }
     val fullUrl = if (fileUrl.startsWith("/")) "http://127.0.0.1:5000$fileUrl" else fileUrl
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(Uri.parse(fullUrl), mimeType ?: "*/*")
@@ -84,12 +96,16 @@ fun openFileInExternalApp(context: Context, fileUrl: String?, mimeType: String?)
         try {
             context.startActivity(browserIntent)
         } catch (ex: Exception) {
+            Toast.makeText(context, "Cannot open file", Toast.LENGTH_SHORT).show()
         }
     }
 }
 
 fun shareFileUrl(context: Context, fileName: String, fileUrl: String?) {
-    if (fileUrl.isNullOrEmpty()) return
+    if (fileUrl.isNullOrEmpty()) {
+        Toast.makeText(context, "Cannot share: file URL unavailable", Toast.LENGTH_SHORT).show()
+        return
+    }
     val fullUrl = if (fileUrl.startsWith("/")) "http://127.0.0.1:5000$fileUrl" else fileUrl
     val sendIntent = Intent().apply {
         action = Intent.ACTION_SEND
@@ -145,7 +161,7 @@ fun HomeScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HomeTabContent(prefManager: SharedPrefManager) {
     val context = LocalContext.current
@@ -160,24 +176,35 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
     var files by remember { mutableStateOf<List<FileDto>>(emptyList()) }
     var isLoading by remember { mutableStateOf(false) }
 
+    var selectedSortOption by remember { mutableStateOf("name_asc") }
+    var showSortMenu by remember { mutableStateOf(false) }
+
     var isUploading by remember { mutableStateOf(false) }
     var uploadingFileName by remember { mutableStateOf("") }
     var uploadingFileSize by remember { mutableStateOf("") }
+    var uploadPercentage by remember { mutableIntStateOf(0) }
     var uploadStatusMessage by remember { mutableStateOf("Preparing upload...") }
 
     var showCreateOptionsModal by remember { mutableStateOf(false) }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
     var newFolderName by remember { mutableStateOf("") }
 
+    var selectedFolderForOptions by remember { mutableStateOf<FolderDto?>(null) }
+    var selectedFileForOptions by remember { mutableStateOf<FileDto?>(null) }
+
+    var renamingFolder by remember { mutableStateOf<FolderDto?>(null) }
+    var renamingFile by remember { mutableStateOf<FileDto?>(null) }
+    var renameInputName by remember { mutableStateOf("") }
+
     fun loadContent() {
         coroutineScope.launch {
             isLoading = true
             try {
-                val fRes = RetrofitClient.apiInterface.getFolders(authToken, currentParentId)
+                val fRes = RetrofitClient.apiInterface.getFolders(authToken, currentParentId, selectedSortOption)
                 if (fRes.isSuccessful && fRes.body() != null) {
                     folders = fRes.body()!!.folders
                 }
-                val fileRes = RetrofitClient.apiInterface.getFiles(authToken, currentParentId)
+                val fileRes = RetrofitClient.apiInterface.getFiles(authToken, currentParentId, selectedSortOption)
                 if (fileRes.isSuccessful && fileRes.body() != null) {
                     files = fileRes.body()!!.files
                 }
@@ -194,7 +221,8 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
         if (uri != null) {
             coroutineScope.launch {
                 isUploading = true
-                uploadStatusMessage = "Reading file details..."
+                uploadPercentage = 0
+                uploadStatusMessage = "Reading file..."
                 try {
                     var fileName = "file"
                     var fileSize: Long = 0
@@ -218,8 +246,15 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
 
                     if (bytes != null) {
                         val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
-                        val requestFile = bytes.toRequestBody(mimeType.toMediaTypeOrNull())
-                        val body = MultipartBody.Part.createFormData("file", fileName, requestFile)
+                        val progressRequestBody = ProgressRequestBody(
+                            contentType = mimeType.toMediaTypeOrNull(),
+                            contentBytes = bytes,
+                            onProgressUpdate = { pct, _, _ ->
+                                uploadPercentage = pct
+                            }
+                        )
+
+                        val body = MultipartBody.Part.createFormData("file", fileName, progressRequestBody)
                         val parentBody = currentParentId?.toRequestBody("text/plain".toMediaTypeOrNull())
 
                         val response = RetrofitClient.apiInterface.uploadFile(
@@ -229,10 +264,11 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         )
 
                         if (response.isSuccessful && response.body()?.success == true) {
+                            uploadPercentage = 100
                             uploadStatusMessage = "Upload Complete!"
                         } else {
-                            val errorMsg = response.body()?.message ?: "Quota or server error"
-                            uploadStatusMessage = "Upload Failed: $errorMsg"
+                            val errorMsg = response.body()?.message ?: "Upload failed"
+                            uploadStatusMessage = "Error: $errorMsg"
                         }
                         loadContent()
                     }
@@ -245,7 +281,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
         }
     }
 
-    LaunchedEffect(currentParentId) {
+    LaunchedEffect(currentParentId, selectedSortOption) {
         loadContent()
     }
 
@@ -276,7 +312,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 }
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = if (folderStack.isEmpty()) "My Storage" else folderStack.last().name,
                         fontSize = 24.sp,
@@ -288,6 +324,41 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                             text = pathString,
                             fontSize = 12.sp,
                             color = Color.Gray
+                        )
+                    }
+                }
+
+                Box {
+                    IconButton(onClick = { showSortMenu = true }) {
+                        Icon(Icons.Default.Sort, contentDescription = "Sort")
+                    }
+                    DropdownMenu(
+                        expanded = showSortMenu,
+                        onDismissRequest = { showSortMenu = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Name (A-Z)") },
+                            onClick = { selectedSortOption = "name_asc"; showSortMenu = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Name (Z-A)") },
+                            onClick = { selectedSortOption = "name_desc"; showSortMenu = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Size (Smallest)") },
+                            onClick = { selectedSortOption = "size_asc"; showSortMenu = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Size (Largest)") },
+                            onClick = { selectedSortOption = "size_desc"; showSortMenu = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Date (Newest)") },
+                            onClick = { selectedSortOption = "date_desc"; showSortMenu = false }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Date (Oldest)") },
+                            onClick = { selectedSortOption = "date_asc"; showSortMenu = false }
                         )
                     }
                 }
@@ -352,7 +423,10 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { folderStack.add(folder) },
+                                .combinedClickable(
+                                    onClick = { folderStack.add(folder) },
+                                    onLongClick = { selectedFolderForOptions = folder }
+                                ),
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Row(
@@ -395,9 +469,14 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable {
-                                    openFileInExternalApp(context, file.path, file.mimeType)
-                                },
+                                .combinedClickable(
+                                    onClick = {
+                                        openFileInExternalApp(context, file.path, file.mimeType)
+                                    },
+                                    onLongClick = {
+                                        selectedFileForOptions = file
+                                    }
+                                ),
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Row(
@@ -462,7 +541,7 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                     modifier = Modifier.size(40.dp)
                 )
             },
-            title = { Text(text = "Uploading File") },
+            title = { Text(text = "Uploading File ($uploadPercentage%)") },
             text = {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -481,7 +560,10 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                         )
                     }
                     Spacer(modifier = Modifier.height(16.dp))
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    LinearProgressIndicator(
+                        progress = { uploadPercentage / 100f },
+                        modifier = Modifier.fillMaxWidth()
+                    )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = uploadStatusMessage,
@@ -491,6 +573,283 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
                 }
             },
             confirmButton = {}
+        )
+    }
+
+    if (selectedFileForOptions != null) {
+        val targetFile = selectedFileForOptions!!
+        ModalBottomSheet(
+            onDismissRequest = { selectedFileForOptions = null }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp)
+            ) {
+                Text(text = targetFile.name, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(text = formatBytes(targetFile.size), fontSize = 12.sp, color = Color.Gray)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedFileForOptions = null
+                            openFileInExternalApp(context, targetFile.path, targetFile.mimeType)
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.OpenInNew, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Open File", fontSize = 16.sp)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val f = targetFile
+                            selectedFileForOptions = null
+                            renamingFile = f
+                            renameInputName = f.name
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Rename File", fontSize = 16.sp)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedFileForOptions = null
+                            coroutineScope.launch {
+                                try {
+                                    RetrofitClient.apiInterface.toggleStarFile(authToken, targetFile._id)
+                                    loadContent()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (targetFile.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = null,
+                        tint = Color(0xFFFFB300)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = if (targetFile.isFavorite) "Remove from Starred" else "Add to Starred",
+                        fontSize = 16.sp
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedFileForOptions = null
+                            shareFileUrl(context, targetFile.name, targetFile.path)
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Share, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Share File Link", fontSize = 16.sp)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedFileForOptions = null
+                            coroutineScope.launch {
+                                try {
+                                    RetrofitClient.apiInterface.trashFile(authToken, targetFile._id)
+                                    loadContent()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Move to Trash", fontSize = 16.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+    }
+
+    if (selectedFolderForOptions != null) {
+        val targetFolder = selectedFolderForOptions!!
+        ModalBottomSheet(
+            onDismissRequest = { selectedFolderForOptions = null }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp)
+            ) {
+                Text(text = targetFolder.name, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(16.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            val fol = targetFolder
+                            selectedFolderForOptions = null
+                            renamingFolder = fol
+                            renameInputName = fol.name
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Rename Folder", fontSize = 16.sp)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedFolderForOptions = null
+                            coroutineScope.launch {
+                                try {
+                                    RetrofitClient.apiInterface.toggleStarFolder(authToken, targetFolder._id)
+                                    loadContent()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = if (targetFolder.isFavorite) Icons.Default.Star else Icons.Default.StarBorder,
+                        contentDescription = null,
+                        tint = Color(0xFFFFB300)
+                    )
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(
+                        text = if (targetFolder.isFavorite) "Remove from Starred" else "Add to Starred",
+                        fontSize = 16.sp
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            selectedFolderForOptions = null
+                            coroutineScope.launch {
+                                try {
+                                    RetrofitClient.apiInterface.trashFolder(authToken, targetFolder._id)
+                                    loadContent()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                        .padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                    Spacer(modifier = Modifier.width(16.dp))
+                    Text(text = "Move to Trash", fontSize = 16.sp, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+    }
+
+    if (renamingFolder != null) {
+        val targetFolder = renamingFolder!!
+        AlertDialog(
+            onDismissRequest = { renamingFolder = null },
+            title = { Text(text = "Rename Folder") },
+            text = {
+                OutlinedTextField(
+                    value = renameInputName,
+                    onValueChange = { renameInputName = it },
+                    label = { Text("Folder Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (renameInputName.isNotBlank()) {
+                            coroutineScope.launch {
+                                try {
+                                    RetrofitClient.apiInterface.renameFolder(
+                                        token = authToken,
+                                        folderId = targetFolder._id,
+                                        request = RenameRequest(renameInputName)
+                                    )
+                                    renamingFolder = null
+                                    loadContent()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renamingFolder = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (renamingFile != null) {
+        val targetFile = renamingFile!!
+        AlertDialog(
+            onDismissRequest = { renamingFile = null },
+            title = { Text(text = "Rename File") },
+            text = {
+                OutlinedTextField(
+                    value = renameInputName,
+                    onValueChange = { renameInputName = it },
+                    label = { Text("File Name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (renameInputName.isNotBlank()) {
+                            coroutineScope.launch {
+                                try {
+                                    RetrofitClient.apiInterface.renameFile(
+                                        token = authToken,
+                                        fileId = targetFile._id,
+                                        request = RenameRequest(renameInputName)
+                                    )
+                                    renamingFile = null
+                                    loadContent()
+                                } catch (e: Exception) {}
+                            }
+                        }
+                    }
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renamingFile = null }) {
+                    Text("Cancel")
+                }
+            }
         )
     }
 
@@ -590,31 +949,198 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
 
 @Composable
 fun DeletedTabContent(prefManager: SharedPrefManager) {
+    val coroutineScope = rememberCoroutineScope()
+    val token = prefManager.getAuthToken() ?: ""
+    val authToken = if (token.startsWith("Bearer ")) token else "Bearer $token"
+
+    var trashedFolders by remember { mutableStateOf<List<FolderDto>>(emptyList()) }
+    var trashedFiles by remember { mutableStateOf<List<FileDto>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(false) }
+
+    fun loadTrashedContent() {
+        coroutineScope.launch {
+            isLoading = true
+            try {
+                val fRes = RetrofitClient.apiInterface.getTrashedFolders(authToken)
+                if (fRes.isSuccessful && fRes.body() != null) {
+                    trashedFolders = fRes.body()!!.folders
+                }
+                val fileRes = RetrofitClient.apiInterface.getTrashedFiles(authToken)
+                if (fileRes.isSuccessful && fileRes.body() != null) {
+                    trashedFiles = fileRes.body()!!.files
+                }
+            } catch (e: Exception) {
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        loadTrashedContent()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
+            .padding(16.dp)
     ) {
-        Icon(
-            imageVector = Icons.Default.Delete,
-            contentDescription = null,
-            modifier = Modifier.size(64.dp),
-            tint = Color.Gray
+        Text(
+            text = "Trash Bin",
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.height(16.dp))
-        Text(
-            text = "Trash Bin is Empty",
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = Color.Gray
-        )
-        Text(
-            text = "Deleted files will appear here",
-            fontSize = 14.sp,
-            color = Color.Gray
-        )
+
+        if (isLoading) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (trashedFolders.isEmpty() && trashedFiles.isEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = null,
+                    modifier = Modifier.size(64.dp),
+                    tint = Color.Gray
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Trash Bin is Empty",
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.Gray
+                )
+                Text(
+                    text = "Deleted files will appear here",
+                    fontSize = 14.sp,
+                    color = Color.Gray
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(trashedFolders) { folder ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Folder,
+                                contentDescription = null,
+                                tint = Color.Gray
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = folder.name, fontWeight = FontWeight.Medium)
+                                Text(text = "Trashed Folder", fontSize = 12.sp, color = Color.Gray)
+                            }
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        try {
+                                            RetrofitClient.apiInterface.restoreFolder(authToken, folder._id)
+                                            loadTrashedContent()
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Restore,
+                                    contentDescription = "Restore",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        try {
+                                            RetrofitClient.apiInterface.deleteFolderPermanently(authToken, folder._id)
+                                            loadTrashedContent()
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteForever,
+                                    contentDescription = "Delete Permanently",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+
+                items(trashedFiles) { file ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.InsertDriveFile,
+                                contentDescription = null,
+                                tint = Color.Gray
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(text = file.name, fontWeight = FontWeight.Medium)
+                                Text(text = formatBytes(file.size), fontSize = 12.sp, color = Color.Gray)
+                            }
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        try {
+                                            RetrofitClient.apiInterface.restoreFile(authToken, file._id)
+                                            loadTrashedContent()
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Restore,
+                                    contentDescription = "Restore",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    coroutineScope.launch {
+                                        try {
+                                            RetrofitClient.apiInterface.deleteFilePermanently(authToken, file._id)
+                                            loadTrashedContent()
+                                        } catch (e: Exception) {}
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteForever,
+                                    contentDescription = "Delete Permanently",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

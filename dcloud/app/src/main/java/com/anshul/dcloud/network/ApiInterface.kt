@@ -7,9 +7,9 @@ import retrofit2.Response
 import retrofit2.http.*
 
 interface ApiInterface {
-    @POST("api/auth/google")
-    suspend fun googleAuth(
-        @Body request: GoogleAuthRequest
+    @POST("api/auth/github")
+    suspend fun githubAuth(
+        @Body request: GitHubAuthRequest
     ): Response<AuthResponse>
 
     @POST("api/folders")
@@ -21,14 +21,40 @@ interface ApiInterface {
     @GET("api/folders")
     suspend fun getFolders(
         @Header("Authorization") token: String,
-        @Query("parentFolder") parentFolder: String? = null
+        @Query("parentFolder") parentFolder: String? = null,
+        @Query("sort") sort: String? = null
     ): Response<FolderListResponse>
+
+    @PATCH("api/folders/{id}/rename")
+    suspend fun renameFolder(
+        @Header("Authorization") token: String,
+        @Path("id") folderId: String,
+        @Body request: RenameRequest
+    ): Response<CreateFolderResponse>
 
     @PATCH("api/folders/{id}/star")
     suspend fun toggleStarFolder(
         @Header("Authorization") token: String,
         @Path("id") folderId: String
     ): Response<CreateFolderResponse>
+
+    @PATCH("api/folders/{id}/trash")
+    suspend fun trashFolder(
+        @Header("Authorization") token: String,
+        @Path("id") folderId: String
+    ): Response<CreateFolderResponse>
+
+    @PATCH("api/folders/{id}/restore")
+    suspend fun restoreFolder(
+        @Header("Authorization") token: String,
+        @Path("id") folderId: String
+    ): Response<CreateFolderResponse>
+
+    @DELETE("api/folders/{id}")
+    suspend fun deleteFolderPermanently(
+        @Header("Authorization") token: String,
+        @Path("id") folderId: String
+    ): Response<AuthResponse>
 
     @GET("api/folders/trashed")
     suspend fun getTrashedFolders(
@@ -57,14 +83,40 @@ interface ApiInterface {
     @GET("api/files")
     suspend fun getFiles(
         @Header("Authorization") token: String,
-        @Query("parentFolder") parentFolder: String? = null
+        @Query("parentFolder") parentFolder: String? = null,
+        @Query("sort") sort: String? = null
     ): Response<FileListResponse>
+
+    @PATCH("api/files/{id}/rename")
+    suspend fun renameFile(
+        @Header("Authorization") token: String,
+        @Path("id") fileId: String,
+        @Body request: RenameRequest
+    ): Response<CreateFileResponse>
 
     @PATCH("api/files/{id}/star")
     suspend fun toggleStarFile(
         @Header("Authorization") token: String,
         @Path("id") fileId: String
     ): Response<CreateFileResponse>
+
+    @PATCH("api/files/{id}/trash")
+    suspend fun trashFile(
+        @Header("Authorization") token: String,
+        @Path("id") fileId: String
+    ): Response<CreateFileResponse>
+
+    @PATCH("api/files/{id}/restore")
+    suspend fun restoreFile(
+        @Header("Authorization") token: String,
+        @Path("id") fileId: String
+    ): Response<CreateFileResponse>
+
+    @DELETE("api/files/{id}")
+    suspend fun deleteFilePermanently(
+        @Header("Authorization") token: String,
+        @Path("id") fileId: String
+    ): Response<AuthResponse>
 
     @GET("api/files/trashed")
     suspend fun getTrashedFiles(
