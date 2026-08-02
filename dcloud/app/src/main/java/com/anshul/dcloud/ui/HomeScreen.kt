@@ -959,70 +959,6 @@ fun HomeTabContent(prefManager: SharedPrefManager) {
     }
 }
 
-@Composable
-fun StoragePieChart(
-    categoryStats: List<CategoryStat>,
-    totalSizeBytes: Long,
-    modifier: Modifier = Modifier
-) {
-    val density = LocalDensity.current
-    val strokeWidthPx = with(density) { 32.dp.toPx() }
-
-    Box(
-        modifier = modifier,
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val chartDiameter = minOf(this.size.width, this.size.height) - strokeWidthPx
-            val topLeftOffset = Offset(
-                (this.size.width - chartDiameter) / 2f,
-                (this.size.height - chartDiameter) / 2f
-            )
-
-            if (totalSizeBytes == 0L) {
-                drawArc(
-                    color = Color.LightGray.copy(alpha = 0.3f),
-                    startAngle = 0f,
-                    sweepAngle = 360f,
-                    useCenter = false,
-                    topLeft = topLeftOffset,
-                    size = Size(chartDiameter, chartDiameter),
-                    style = Stroke(width = strokeWidthPx)
-                )
-            } else {
-                var startAngle = -90f
-                categoryStats.forEach { stat ->
-                    val sweepAngle = (stat.bytes.toFloat() / totalSizeBytes.toFloat()) * 360f
-                    if (sweepAngle > 0f) {
-                        drawArc(
-                            color = stat.color,
-                            startAngle = startAngle,
-                            sweepAngle = sweepAngle,
-                            useCenter = false,
-                            topLeft = topLeftOffset,
-                            size = Size(chartDiameter, chartDiameter),
-                            style = Stroke(width = strokeWidthPx)
-                        )
-                        startAngle += sweepAngle
-                    }
-                }
-            }
-        }
-
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "Used Storage",
-                fontSize = 12.sp,
-                color = Color.Gray
-            )
-            Text(
-                text = formatBytes(totalSizeBytes),
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
 
 data class CategoryStat(
     val name: String,
@@ -1229,11 +1165,7 @@ fun ProfileTabContent(
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    StoragePieChart(
-                        categoryStats = categoryStats,
-                        totalSizeBytes = totalSizeBytes,
-                        modifier = Modifier.size(180.dp)
-                    )
+//
 
                     Spacer(modifier = Modifier.height(20.dp))
 

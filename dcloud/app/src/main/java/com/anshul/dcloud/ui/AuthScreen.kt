@@ -93,9 +93,9 @@ fun AuthScreen(
                         Spacer(modifier = Modifier.height(16.dp))
 
                         if (!showDirectInput) {
-                            TextButton(onClick = { showDirectInput = true }) {
-                                Text(text = "Use GitHub Username", fontSize = 14.sp)
-                            }
+//                            TextButton(onClick = { showDirectInput = true }) {
+//                                Text(text = "Use GitHub Username", fontSize = 14.sp)
+//                            }
                         } else {
                             OutlinedTextField(
                                 value = usernameInput,
