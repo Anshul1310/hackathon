@@ -27,6 +27,7 @@ data class FileDto(
     val size: Long = 0,
     val mimeType: String = "",
     val parentFolder: String? = null,
+    val path: String? = null,
     val isFavorite: Boolean = false,
     val isTrashed: Boolean = false,
     val createdAt: String? = null
